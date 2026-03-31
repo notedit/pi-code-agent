@@ -17,15 +17,12 @@ export interface AgentConfig {
   model?: Model<any>;
   /** Thinking/reasoning level. Default: 'medium' */
   thinkingLevel: ThinkingLevel;
-  /** Enable built-in Tavily web search tool. Auto-disabled if extensions registers 'web_search'. Default: true */
-  enableWebSearch: boolean;
-  /** Enable built-in URL fetch tool. Auto-disabled if extensions registers 'web_fetch'. Default: true */
-  enableWebFetch: boolean;
-  /** Path to env file for API keys. Default: undefined (set explicitly or use env vars) */
+  /** Path to env file for API keys. Default: undefined */
   envFile?: string;
-  /** Tavily API key. Falls back to TAVILY_API_KEY env var. */
+  /** Tavily API key for webSearchTool. Falls back to TAVILY_API_KEY env var. */
   tavilyApiKey?: string;
-  /** Custom tool extensions to register alongside built-in tools. */
+  /** Extension factories. Default includes webSearchTool() and webFetchTool().
+   *  Override to customize: pass [] to disable, or your own list. */
   extensions?: ExtensionFactory[];
   /** Override the built-in tools array. Default: all tools (read, write, edit, bash, grep, find, ls).
    *  Pass readOnlyTools or a custom subset to restrict capabilities. */
@@ -40,8 +37,6 @@ export const defaultConfig: AgentConfig = {
   provider: 'openrouter',
   modelId: 'anthropic/claude-sonnet-4',
   thinkingLevel: 'medium',
-  enableWebSearch: true,
-  enableWebFetch: true,
 };
 
 export function loadEnvFile(filePath: string): Record<string, string> {
