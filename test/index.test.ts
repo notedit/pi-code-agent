@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { create, resume, type AgentConfig } from '../src/index.js';
+import { create, resume, readOnlyTools, SessionManager, webSearchTool, type AgentConfig } from '../src/index.js';
 import { loadEnvFile } from '../src/config.js';
 import { writeFileSync, unlinkSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -155,16 +155,54 @@ describe('pi-code-agent integration', () => {
   });
 
   it('should resume the most recent session', async () => {
-    // Create a session first
     const { session: original } = await create(testConfig);
     await original.prompt('Remember the number 42.');
-    const originalId = original.sessionId;
     original.dispose();
 
-    // Resume
     const { session: resumed } = await resume(testConfig);
     assert.ok(resumed.sessionId, 'Resumed session should have an ID');
 
     resumed.dispose();
   });
+
+  it('should return extensionsResult', async () => {
+    const result = await create(testConfig);
+    assert.ok(result.extensionsResult, 'Should return extensionsResult');
+    session_cleanup(result.session);
+  });
+
+  it('should support custom tools array (readOnlyTools)', async () => {
+    const { session } = await create({ ...testConfig, tools: readOnlyTools });
+    const tools = session.getActiveToolNames();
+    assert.ok(tools.includes('read'), 'Should have read');
+    assert.ok(!tools.includes('write'), 'Should NOT have write in readOnly mode');
+    assert.ok(!tools.includes('edit'), 'Should NOT have edit in readOnly mode');
+    session.dispose();
+  });
+
+  it('should support SessionManager.inMemory()', async () => {
+    const { session } = await create({
+      ...testConfig,
+      sessionManager: SessionManager.inMemory(),
+    });
+    assert.ok(session.sessionId, 'Should have session ID');
+    assert.strictEqual(session.sessionFile, undefined, 'In-memory session should have no file');
+    session.dispose();
+  });
+
+  it('should auto-disable built-in web_search when user provides it in extensions', async () => {
+    const { session } = await create({
+      ...testConfig,
+      enableWebSearch: true,
+      extensions: [webSearchTool({ apiKey: 'custom-key' })],
+    });
+    const tools = session.getActiveToolNames();
+    // web_search should appear exactly once (the user's version)
+    assert.ok(tools.includes('web_search'), 'Should have web_search');
+    session.dispose();
+  });
 });
+
+function session_cleanup(session: any) {
+  session.dispose();
+}

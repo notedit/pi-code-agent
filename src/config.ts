@@ -2,19 +2,29 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-import type { ExtensionFactory } from '@mariozechner/pi-coding-agent';
+import type { ExtensionFactory, SessionManager } from '@mariozechner/pi-coding-agent';
+import type { Model } from '@mariozechner/pi-ai';
 
 export interface AgentConfig {
   cwd: string;
   provider: string;
   modelId: string;
+  /** Pass a pre-resolved pi-mono Model object to bypass provider/modelId string resolution. */
+  model?: Model<any>;
   thinkingLevel: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   enableWebSearch: boolean;
   enableWebFetch: boolean;
   envFile?: string;
   tavilyApiKey?: string;
-  /** Custom tool extensions to register alongside built-in tools. */
+  /** Custom tool extensions. If an extension registers a tool named 'web_search' or 'web_fetch',
+   *  the corresponding enableWebSearch/enableWebFetch flag is automatically disabled. */
   extensions: ExtensionFactory[];
+  /** Override the built-in tools array. Default includes all tools (read, write, edit, bash, grep, find, ls).
+   *  Pass readOnlyTools or a custom subset to restrict capabilities. */
+  tools?: any[];
+  /** Override session manager. Use SessionManager.inMemory() for testing,
+   *  SessionManager.open(path) for a specific session, etc. */
+  sessionManager?: ReturnType<typeof SessionManager.create>;
 }
 
 export const defaultConfig: AgentConfig = {
@@ -55,7 +65,6 @@ export function loadEnvFile(filePath: string): Record<string, string> {
       env[key] = value;
     }
   } catch (err: unknown) {
-    // Only silence "file not found"; rethrow other errors
     if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
       return env;
     }
