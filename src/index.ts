@@ -19,7 +19,7 @@ import { defaultConfig, loadEnvFile, type AgentConfig } from './config.js';
 import { webSearchTool, webFetchTool } from './tools.js';
 
 // --- Re-exports: pi-code-agent API ---
-export type { AgentConfig } from './config.js';
+export type { AgentConfig, ThinkingLevel } from './config.js';
 export { defaultConfig } from './config.js';
 export type { AgentSession, AgentSessionEvent };
 export { webSearchTool, webFetchTool } from './tools.js';
@@ -103,7 +103,8 @@ async function createSessionInternal(
   const tavilyKey = config.tavilyApiKey ?? process.env.TAVILY_API_KEY;
 
   // Detect tool names in user extensions to auto-disable conflicting built-ins
-  const userExtensionToolNames = detectExtensionToolNames(config.extensions);
+  const userExtensions = config.extensions ?? [];
+  const userExtensionToolNames = detectExtensionToolNames(userExtensions);
   const enableSearch = config.enableWebSearch && !userExtensionToolNames.has('web_search');
   const enableFetch = config.enableWebFetch && !userExtensionToolNames.has('web_fetch');
 
@@ -115,7 +116,7 @@ async function createSessionInternal(
   if (enableFetch) {
     extensionFactories.push(webFetchTool());
   }
-  extensionFactories.push(...config.extensions);
+  extensionFactories.push(...userExtensions);
 
   const resourceLoader = new DefaultResourceLoader({
     cwd: config.cwd,

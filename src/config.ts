@@ -1,25 +1,33 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
 
+import type { ThinkingLevel } from '@mariozechner/pi-agent-core';
 import type { ExtensionFactory, SessionManager } from '@mariozechner/pi-coding-agent';
 import type { Model } from '@mariozechner/pi-ai';
 
+export type { ThinkingLevel } from '@mariozechner/pi-agent-core';
+
 export interface AgentConfig {
+  /** Working directory for the agent session. Default: process.cwd() */
   cwd: string;
+  /** LLM provider name. Default: 'openrouter' */
   provider: string;
+  /** Model ID within the provider. Default: 'anthropic/claude-sonnet-4' */
   modelId: string;
-  /** Pass a pre-resolved pi-mono Model object to bypass provider/modelId string resolution. */
+  /** Pre-resolved pi-mono Model object. Bypasses provider/modelId string resolution. */
   model?: Model<any>;
-  thinkingLevel: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  /** Thinking/reasoning level. Default: 'medium' */
+  thinkingLevel: ThinkingLevel;
+  /** Enable built-in Tavily web search tool. Auto-disabled if extensions registers 'web_search'. Default: true */
   enableWebSearch: boolean;
+  /** Enable built-in URL fetch tool. Auto-disabled if extensions registers 'web_fetch'. Default: true */
   enableWebFetch: boolean;
+  /** Path to env file for API keys. Default: undefined (set explicitly or use env vars) */
   envFile?: string;
+  /** Tavily API key. Falls back to TAVILY_API_KEY env var. */
   tavilyApiKey?: string;
-  /** Custom tool extensions. If an extension registers a tool named 'web_search' or 'web_fetch',
-   *  the corresponding enableWebSearch/enableWebFetch flag is automatically disabled. */
-  extensions: ExtensionFactory[];
-  /** Override the built-in tools array. Default includes all tools (read, write, edit, bash, grep, find, ls).
+  /** Custom tool extensions to register alongside built-in tools. */
+  extensions?: ExtensionFactory[];
+  /** Override the built-in tools array. Default: all tools (read, write, edit, bash, grep, find, ls).
    *  Pass readOnlyTools or a custom subset to restrict capabilities. */
   tools?: any[];
   /** Override session manager. Use SessionManager.inMemory() for testing,
@@ -34,8 +42,6 @@ export const defaultConfig: AgentConfig = {
   thinkingLevel: 'medium',
   enableWebSearch: true,
   enableWebFetch: true,
-  envFile: join(homedir(), '.secrets', 'common.env'),
-  extensions: [],
 };
 
 export function loadEnvFile(filePath: string): Record<string, string> {
@@ -46,7 +52,6 @@ export function loadEnvFile(filePath: string): Record<string, string> {
       let trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
 
-      // Handle `export KEY=value` syntax
       if (trimmed.startsWith('export ')) {
         trimmed = trimmed.slice(7).trim();
       }
@@ -56,7 +61,6 @@ export function loadEnvFile(filePath: string): Record<string, string> {
       const key = trimmed.slice(0, eqIndex).trim();
       let value = trimmed.slice(eqIndex + 1).trim();
 
-      // Strip surrounding quotes
       if ((value.startsWith('"') && value.endsWith('"')) ||
           (value.startsWith("'") && value.endsWith("'"))) {
         value = value.slice(1, -1);
