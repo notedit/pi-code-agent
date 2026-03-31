@@ -1,0 +1,26 @@
+{
+  "name": "pi-code-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Code agent based on pi-mono with skills, search, session recovery and auto compact",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "tsx src/run.ts",
+    "build": "tsc",
+    "test": "tsx --test test/**/*.test.ts",
+    "health-report": "tsx examples/codebase-health-report.ts"
+  },
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "^0.64.0",
+    "@mariozechner/pi-ai": "^0.64.0",
+    "@mariozechner/pi-coding-agent": "^0.64.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
