@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
+import type { ExtensionFactory } from '@mariozechner/pi-coding-agent';
+
 export interface AgentConfig {
   cwd: string;
   provider: string;
@@ -11,6 +13,8 @@ export interface AgentConfig {
   enableWebFetch: boolean;
   envFile?: string;
   tavilyApiKey?: string;
+  /** Custom tool extensions to register alongside built-in tools. */
+  extensions: ExtensionFactory[];
 }
 
 export const defaultConfig: AgentConfig = {
@@ -21,6 +25,7 @@ export const defaultConfig: AgentConfig = {
   enableWebSearch: true,
   enableWebFetch: true,
   envFile: join(homedir(), '.secrets', 'common.env'),
+  extensions: [],
 };
 
 export function loadEnvFile(filePath: string): Record<string, string> {
