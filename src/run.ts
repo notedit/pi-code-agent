@@ -12,8 +12,6 @@ async function main() {
     provider: 'openrouter',
     modelId: 'anthropic/claude-sonnet-4',
     thinkingLevel: 'off',
-    enableWebSearch: true,
-    enableWebFetch: true,
   });
 
   if (modelFallbackMessage) {

@@ -100,7 +100,7 @@ async function createSessionInternal(
   const modelRegistry = ModelRegistry.create(authStorage);
 
   // Resolve model
-  const model = config.model ?? getModel(config.provider as Parameters<typeof getModel>[0], config.modelId as any);
+  const model = config.model ?? getModel(config.provider as Parameters<typeof getModel>[0], config.modelId as Parameters<typeof getModel>[1]);
   if (!model) {
     throw new Error(`Model not found: ${config.provider}/${config.modelId}. Check provider and model ID.`);
   }

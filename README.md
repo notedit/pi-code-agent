@@ -12,26 +12,31 @@ Code agent built on [pi-mono](https://github.com/badlogic/pi-mono), extending it
 - **Auto Compact** — Automatic context summarization when approaching token limits
 - **9 Built-in Tools** — read, write, edit, bash, grep, find, ls, web_search, web_fetch
 
-## Quick Start
+## Installation
+
+Published on [GitHub Packages](https://github.com/notedit/pi-code-agent/packages). Configure your `.npmrc` first:
 
 ```bash
-# Install
-npm install
-
-# Set API keys
-cp .env.example ~/.secrets/common.env
-# Edit ~/.secrets/common.env with your OPENROUTER_API_KEY
-
-# Run
-npx tsx src/run.ts "List the files in this project"
+# Add to your project's .npmrc (or ~/.npmrc)
+@notedit:registry=https://npm.pkg.github.com
 ```
 
-## API Usage
+Then install:
+
+```bash
+npm install @notedit/pi-code-agent
+```
+
+> **Note:** You need a GitHub Personal Access Token with `read:packages` scope to install from GitHub Packages. Configure it via:
+> ```bash
+> npm set //npm.pkg.github.com/:_authToken=ghp_YOUR_TOKEN
+> ```
+
+## Quick Start
 
 ```typescript
-import { create, resume } from './src/index.js';
+import { create } from '@notedit/pi-code-agent';
 
-// Create a new session
 const { session } = await create({
   provider: 'openrouter',
   modelId: 'anthropic/claude-sonnet-4',
@@ -55,22 +60,52 @@ session.dispose();
 ### Resume a Session
 
 ```typescript
+import { resume } from '@notedit/pi-code-agent';
+
 const { session } = await resume({ cwd: '/path/to/project' });
 await session.prompt('Continue where we left off.');
+```
+
+### Custom Extensions
+
+```typescript
+import { create, webSearchTool, webFetchTool } from '@notedit/pi-code-agent';
+
+// Use only web search (no web fetch)
+const { session } = await create({
+  extensions: [webSearchTool({ apiKey: 'tvly-xxx' })],
+});
+
+// Disable all web tools
+const { session: noWebSession } = await create({
+  extensions: [],
+});
+```
+
+### Read-Only Mode
+
+```typescript
+import { create, readOnlyTools } from '@notedit/pi-code-agent';
+
+const { session } = await create({
+  tools: readOnlyTools,  // read, grep, find, ls only — no write/edit/bash
+});
 ```
 
 ## Configuration
 
 ```typescript
 interface AgentConfig {
-  cwd: string;              // Working directory (default: process.cwd())
-  provider: string;         // LLM provider (default: 'openrouter')
-  modelId: string;          // Model ID (default: 'anthropic/claude-sonnet-4')
-  thinkingLevel: string;    // 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
-  enableWebSearch: boolean; // Enable Tavily web search (default: true)
-  enableWebFetch: boolean;  // Enable URL fetching (default: true)
-  envFile?: string;         // Env file path (default: ~/.secrets/common.env)
-  tavilyApiKey?: string;    // Tavily API key (or set TAVILY_API_KEY env var)
+  cwd: string;                    // Working directory (default: process.cwd())
+  provider: string;               // LLM provider (default: 'openrouter')
+  modelId: string;                // Model ID (default: 'anthropic/claude-sonnet-4')
+  model?: Model;                  // Pre-resolved pi-mono Model object (bypasses provider/modelId)
+  thinkingLevel: ThinkingLevel;   // 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  envFile?: string;               // Env file path for API keys
+  tavilyApiKey?: string;          // Tavily API key (or set TAVILY_API_KEY env var)
+  extensions?: ExtensionFactory[];// Web tool extensions (default: [webSearchTool(), webFetchTool()])
+  tools?: any[];                  // Built-in tools (default: all coding tools + grep/find/ls)
+  sessionManager?: SessionManager;// Override session persistence
 }
 ```
 
@@ -81,7 +116,28 @@ interface AgentConfig {
 | `OPENROUTER_API_KEY` | Required. OpenRouter API key |
 | `TAVILY_API_KEY` | Optional. Enables web_search tool |
 
-Keys can be set in `~/.secrets/common.env` (auto-loaded) or as environment variables.
+Keys can be set in an env file (pass `envFile` option) or as environment variables.
+
+## Exports
+
+`@notedit/pi-code-agent` re-exports commonly used types and utilities from pi-mono for convenience:
+
+```typescript
+// Core API
+import { create, resume, defaultConfig } from '@notedit/pi-code-agent';
+
+// Tool factories
+import { webSearchTool, webFetchTool } from '@notedit/pi-code-agent';
+
+// pi-mono escape hatch (advanced)
+import {
+  createAgentSession, AuthStorage, ModelRegistry,
+  SessionManager, DefaultResourceLoader,
+  codingTools, readOnlyTools,
+  grepTool, findTool, lsTool, readTool, bashTool, editTool, writeTool,
+  getModel, getModels, getProviders, Type,
+} from '@notedit/pi-code-agent';
+```
 
 ## Skills
 
@@ -117,8 +173,9 @@ npx tsx examples/codebase-health-report.ts /path/to/project --resume
 ```
 pi-code-agent/
 ├── src/
-│   ├── index.ts       # API: create(), resume(), extensions
+│   ├── index.ts       # API: create(), resume(), re-exports
 │   ├── config.ts      # AgentConfig, env file loader
+│   ├── tools.ts       # webSearchTool, webFetchTool factories
 │   └── run.ts         # CLI runner
 ├── examples/
 │   └── codebase-health-report.ts
@@ -127,13 +184,32 @@ pi-code-agent/
 │   ├── APPEND_SYSTEM.md   # Claude Code style system prompt
 │   └── settings.json      # Compaction config
 └── test/
-    └── index.test.ts      # 14 tests (unit + integration)
+    └── index.test.ts      # 19 tests (unit + integration)
 ```
 
-## Testing
+## Development
 
 ```bash
-TAVILY_API_KEY=your_key npx tsx --test test/index.test.ts
+# Install dependencies
+npm install
+
+# Build
+npm run build
+
+# Run tests
+TAVILY_API_KEY=your_key npm test
+
+# Run locally
+npx tsx src/run.ts "List the files in this project"
+```
+
+## Publishing
+
+Published to GitHub Packages via CI (on GitHub Release) or manually:
+
+```bash
+npm version patch
+npm publish
 ```
 
 ## License

@@ -1,19 +1,31 @@
 {
-  "name": "pi-code-agent",
-  "version": "0.1.0",
+  "name": "@notedit/pi-code-agent",
+  "version": "0.1.1",
   "type": "module",
   "description": "Code agent based on pi-mono with skills, search, session recovery and auto compact",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "start": "tsx src/run.ts",
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "tsx --test test/**/*.test.ts",
     "health-report": "tsx examples/codebase-health-report.ts"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/notedit/pi-code-agent.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "dependencies": {
-    "@mariozechner/pi-agent-core": "^0.64.0",
-    "@mariozechner/pi-ai": "^0.64.0",
-    "@mariozechner/pi-coding-agent": "^0.64.0"
+    "@mariozechner/pi-agent-core": "^0.65.2",
+    "@mariozechner/pi-ai": "^0.65.2",
+    "@mariozechner/pi-coding-agent": "^0.65.2"
   },
   "devDependencies": {
     "@types/node": "^22",
