@@ -7,7 +7,7 @@
 
 import { Type } from '@mariozechner/pi-ai';
 import type { ExtensionFactory } from '@mariozechner/pi-coding-agent';
-import { logger, recordToolMetric } from './logger.js';
+import { logger, recordToolMetric, type Tracer, type SpanHandle } from './logger.js';
 
 // --- Tavily types ---
 
@@ -33,17 +33,27 @@ async function sleep(ms: number): Promise<void> {
 /**
  * Fetch with exponential backoff retry for transient failures.
  * Retries on network errors and 5xx / 429 status codes.
+ * Creates child spans under parentSpan for each attempt if provided.
  */
 async function fetchWithRetry(
   url: string,
   init: RequestInit,
   maxRetries = 3,
+  parentSpan?: SpanHandle,
 ): Promise<Response> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const attemptSpan = parentSpan?.startChild('http.fetch', {
+      url,
+      attempt: attempt + 1,
+      maxRetries: maxRetries + 1,
+    });
+
     try {
       const response = await fetch(url, init);
       if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < maxRetries) {
         const delayMs = 1000 * 2 ** attempt;
+        attemptSpan?.setAttributes({ status: response.status, action: 'retry', delayMs });
+        attemptSpan?.end();
         logger.warn('http', `Retryable status ${response.status} from ${url}, retrying in ${delayMs}ms`, {
           attempt: attempt + 1,
           maxRetries,
@@ -52,19 +62,23 @@ async function fetchWithRetry(
         await sleep(delayMs);
         continue;
       }
+      attemptSpan?.setAttributes({ status: response.status });
+      attemptSpan?.end();
       return response;
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      attemptSpan?.setError(msg);
+      attemptSpan?.end();
       if (attempt === maxRetries) throw err;
       const delayMs = 1000 * 2 ** attempt;
       logger.warn('http', `Network error fetching ${url}, retrying in ${delayMs}ms`, {
         attempt: attempt + 1,
         maxRetries,
-        error: err instanceof Error ? err.message : String(err),
+        error: msg,
       });
       await sleep(delayMs);
     }
   }
-  // Unreachable — the loop either returns or throws
   throw new Error(`fetchWithRetry: exhausted ${maxRetries} retries for ${url}`);
 }
 
@@ -75,7 +89,6 @@ async function fetchWithRetry(
  * Uses streaming to avoid buffering the entire response into memory.
  */
 async function readResponseText(response: Response, maxLen: number): Promise<{ text: string; truncated: boolean }> {
-  // Fallback if body stream is unavailable
   if (!response.body) {
     let text = await response.text();
     const truncated = text.length > maxLen;
@@ -94,7 +107,6 @@ async function readResponseText(response: Response, maxLen: number): Promise<{ t
       if (done) break;
       text += decoder.decode(value, { stream: true });
     }
-    // Flush any remaining bytes
     text += decoder.decode();
   } finally {
     reader.cancel().catch(() => {});
@@ -111,21 +123,16 @@ async function readResponseText(response: Response, maxLen: number): Promise<{ t
 
 export interface WebSearchOptions {
   apiKey?: string;
+  /** Tracer for span-based tracing. Each tool call creates a child span. */
+  tracer?: Tracer;
 }
 
 /**
  * Creates a web_search tool extension powered by Tavily.
- *
- * @example
- * ```ts
- * import { webSearchTool } from './tools.js';
- * const { session } = await create({
- *   extensions: [webSearchTool({ apiKey: 'tvly-xxx' })],
- * });
- * ```
  */
 export function webSearchTool(options?: WebSearchOptions): ExtensionFactory {
   const apiKey = options?.apiKey;
+  const tracer = options?.tracer;
 
   return (pi) => {
     pi.registerTool({
@@ -146,8 +153,8 @@ export function webSearchTool(options?: WebSearchOptions): ExtensionFactory {
           };
         }
 
+        const toolSpan = tracer?.startSpan('tool.web_search', { query: params.query, max_results: params.max_results });
         const startTime = performance.now();
-        logger.debug('tools', 'web_search executing', { query: params.query, max_results: params.max_results });
 
         try {
           const response = await fetchWithRetry('https://api.tavily.com/search', {
@@ -160,18 +167,21 @@ export function webSearchTool(options?: WebSearchOptions): ExtensionFactory {
               include_answer: true,
             }),
             signal: signal ?? AbortSignal.timeout(30000),
-          });
+          }, 3, toolSpan);
 
           if (!response.ok) {
             const durationMs = Math.round(performance.now() - startTime);
-            recordToolMetric('web_search', durationMs, true);
-            logger.error('tools', `web_search HTTP error for query "${params.query}"`, { status: response.status });
+            recordToolMetric('web_search', durationMs, true, tracer?.agentId);
+            toolSpan?.setError(`HTTP ${response.status}`);
+            toolSpan?.setAttributes({ status: response.status });
+            toolSpan?.end();
             return {
               content: [{ type: 'text' as const, text: `Search error for query "${params.query}": ${response.status} ${response.statusText}` }],
               details: {},
             };
           }
 
+          const parseSpan = toolSpan?.startChild('tool.web_search.parseResponse');
           const data: TavilyResponse = await response.json();
           let result = '';
 
@@ -185,14 +195,13 @@ export function webSearchTool(options?: WebSearchOptions): ExtensionFactory {
               result += `### ${item.title}\nURL: ${item.url}\n${item.content}\n\n`;
             }
           }
+          parseSpan?.setAttributes({ resultCount: data.results?.length ?? 0, hasAnswer: !!data.answer });
+          parseSpan?.end();
 
           const durationMs = Math.round(performance.now() - startTime);
-          recordToolMetric('web_search', durationMs, false);
-          logger.debug('tools', 'web_search completed', {
-            query: params.query,
-            resultCount: data.results?.length ?? 0,
-            durationMs,
-          });
+          recordToolMetric('web_search', durationMs, false, tracer?.agentId);
+          toolSpan?.setAttributes({ resultCount: data.results?.length ?? 0 });
+          toolSpan?.end();
 
           return {
             content: [{ type: 'text' as const, text: result || 'No results found.' }],
@@ -200,9 +209,10 @@ export function webSearchTool(options?: WebSearchOptions): ExtensionFactory {
           };
         } catch (error: unknown) {
           const durationMs = Math.round(performance.now() - startTime);
-          recordToolMetric('web_search', durationMs, true);
+          recordToolMetric('web_search', durationMs, true, tracer?.agentId);
           const msg = error instanceof Error ? error.message : String(error);
-          logger.error('tools', `web_search failed for query "${params.query}"`, { error: msg, durationMs });
+          toolSpan?.setError(msg);
+          toolSpan?.end();
           return {
             content: [{ type: 'text' as const, text: `Search failed for query "${params.query}": ${msg}` }],
             details: {},
@@ -216,18 +226,17 @@ export function webSearchTool(options?: WebSearchOptions): ExtensionFactory {
 
 // --- Web Fetch ---
 
+export interface WebFetchOptions {
+  /** Tracer for span-based tracing. Each tool call creates a child span. */
+  tracer?: Tracer;
+}
+
 /**
  * Creates a web_fetch tool extension for fetching URL content.
- *
- * @example
- * ```ts
- * import { webFetchTool } from './tools.js';
- * const { session } = await create({
- *   extensions: [webFetchTool()],
- * });
- * ```
  */
-export function webFetchTool(): ExtensionFactory {
+export function webFetchTool(options?: WebFetchOptions): ExtensionFactory {
+  const tracer = options?.tracer;
+
   return (pi) => {
     pi.registerTool({
       name: 'web_fetch',
@@ -237,12 +246,14 @@ export function webFetchTool(): ExtensionFactory {
         url: Type.String({ description: 'The URL to fetch' }),
       }),
       execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
+        const toolSpan = tracer?.startSpan('tool.web_fetch', { url: params.url });
         const startTime = performance.now();
-        logger.debug('tools', 'web_fetch executing', { url: params.url });
 
         try {
           const parsed = new URL(params.url);
           if (!['http:', 'https:'].includes(parsed.protocol)) {
+            toolSpan?.setError(`Unsupported protocol: ${parsed.protocol}`);
+            toolSpan?.end();
             return {
               content: [{ type: 'text' as const, text: `Error: Only http and https URLs are supported, got ${parsed.protocol}` }],
               details: {},
@@ -257,12 +268,14 @@ export function webFetchTool(): ExtensionFactory {
               'Accept': 'text/html,application/json,text/plain',
             },
             signal: fetchSignal,
-          });
+          }, 3, toolSpan);
 
           if (!response.ok) {
             const durationMs = Math.round(performance.now() - startTime);
-            recordToolMetric('web_fetch', durationMs, true);
-            logger.error('tools', `web_fetch HTTP error for URL "${params.url}"`, { status: response.status });
+            recordToolMetric('web_fetch', durationMs, true, tracer?.agentId);
+            toolSpan?.setError(`HTTP ${response.status}`);
+            toolSpan?.setAttributes({ status: response.status });
+            toolSpan?.end();
             return {
               content: [{ type: 'text' as const, text: `Fetch error for "${params.url}": ${response.status} ${response.statusText}` }],
               details: {},
@@ -275,20 +288,30 @@ export function webFetchTool(): ExtensionFactory {
           let truncated = false;
 
           if (contentType.includes('application/json')) {
+            const parseSpan = toolSpan?.startChild('tool.web_fetch.parseJson');
             const json = await response.json();
             text = JSON.stringify(json, null, 2);
             truncated = text.length > maxLen;
             if (truncated) {
               text = text.slice(0, maxLen);
             }
+            parseSpan?.setAttributes({ originalLength: text.length, truncated });
+            parseSpan?.end();
           } else {
             // Stream HTML with early termination
+            const readSpan = toolSpan?.startChild('tool.web_fetch.readHtml');
             const result = await readResponseText(response, maxLen * 2);
+            readSpan?.setAttributes({ rawLength: result.text.length, rawTruncated: result.truncated });
+            readSpan?.end();
+
+            const extractSpan = toolSpan?.startChild('tool.web_fetch.extractText');
             text = extractTextFromHtml(result.text);
             truncated = text.length > maxLen;
             if (truncated) {
               text = text.slice(0, maxLen);
             }
+            extractSpan?.setAttributes({ extractedLength: text.length, truncated });
+            extractSpan?.end();
           }
 
           if (truncated) {
@@ -296,14 +319,9 @@ export function webFetchTool(): ExtensionFactory {
           }
 
           const durationMs = Math.round(performance.now() - startTime);
-          recordToolMetric('web_fetch', durationMs, false);
-          logger.debug('tools', 'web_fetch completed', {
-            url: params.url,
-            contentType,
-            textLength: text.length,
-            truncated,
-            durationMs,
-          });
+          recordToolMetric('web_fetch', durationMs, false, tracer?.agentId);
+          toolSpan?.setAttributes({ contentType, textLength: text.length, truncated });
+          toolSpan?.end();
 
           return {
             content: [{ type: 'text' as const, text }],
@@ -311,9 +329,10 @@ export function webFetchTool(): ExtensionFactory {
           };
         } catch (error: unknown) {
           const durationMs = Math.round(performance.now() - startTime);
-          recordToolMetric('web_fetch', durationMs, true);
+          recordToolMetric('web_fetch', durationMs, true, tracer?.agentId);
           const msg = error instanceof Error ? error.message : String(error);
-          logger.error('tools', `web_fetch failed for URL "${params.url}"`, { error: msg, durationMs });
+          toolSpan?.setError(msg);
+          toolSpan?.end();
           return {
             content: [{ type: 'text' as const, text: `Fetch failed for "${params.url}": ${msg}` }],
             details: {},
@@ -362,12 +381,9 @@ function decodeHtmlEntities(text: string): string {
 export function extractTextFromHtml(html: string): string {
   return decodeHtmlEntities(
     html
-      // Remove non-content blocks in a single combined pattern
       .replace(/<(head|script|style|noscript|svg|iframe)[^>]*>[\s\S]*?<\/\1>/gi, '')
-      // Strip remaining HTML tags
       .replace(/<[^>]+>/g, ' ')
   )
-    // Collapse whitespace
     .replace(/\s+/g, ' ')
     .trim();
 }

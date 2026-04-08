@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { create, resume, readOnlyTools, SessionManager, webSearchTool, webFetchTool, extractTextFromHtml, type AgentConfig } from '../src/index.js';
+import { create, resume, readOnlyTools, SessionManager, webSearchTool, webFetchTool, extractTextFromHtml, createTracer, type AgentConfig } from '../src/index.js';
 import { loadEnvFile, validateConfig, type AgentConfig as FullAgentConfig } from '../src/config.js';
 import { writeFileSync, unlinkSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -214,6 +214,103 @@ describe('validateConfig', () => {
   });
 });
 
+// --- Tracer Unit Tests ---
+
+describe('createTracer', () => {
+  it('should generate unique agentId and traceId', () => {
+    const tracer = createTracer();
+    assert.ok(tracer.agentId.startsWith('agent_'), `agentId should start with agent_: ${tracer.agentId}`);
+    assert.ok(tracer.traceId.startsWith('trace_'), `traceId should start with trace_: ${tracer.traceId}`);
+    assert.strictEqual(tracer.agentId.length, 'agent_'.length + 8);
+  });
+
+  it('should accept a custom agentId', () => {
+    const tracer = createTracer('agent_custom123');
+    assert.strictEqual(tracer.agentId, 'agent_custom123');
+  });
+
+  it('should record spans with timing', async () => {
+    const tracer = createTracer();
+    const span = tracer.startSpan('test.operation', { key: 'value' });
+    await new Promise((r) => setTimeout(r, 10));
+    span.end();
+
+    const spans = tracer.getSpans();
+    assert.strictEqual(spans.length, 1);
+    assert.strictEqual(spans[0].name, 'test.operation');
+    assert.strictEqual(spans[0].status, 'ok');
+    assert.ok(spans[0].durationMs !== undefined && spans[0].durationMs >= 0, 'Should have duration');
+    assert.strictEqual(spans[0].attributes.key, 'value');
+    assert.ok(spans[0].startTime, 'Should have startTime');
+    assert.ok(spans[0].endTime, 'Should have endTime');
+  });
+
+  it('should support parent-child span relationships', () => {
+    const tracer = createTracer();
+    const parent = tracer.startSpan('parent');
+    const child = parent.startChild('child', { step: 1 });
+    const grandchild = child.startChild('grandchild');
+    grandchild.end();
+    child.end();
+    parent.end();
+
+    const spans = tracer.getSpans();
+    assert.strictEqual(spans.length, 3);
+
+    const [p, c, gc] = spans;
+    assert.strictEqual(p.parentSpanId, undefined);
+    assert.strictEqual(c.parentSpanId, p.spanId);
+    assert.strictEqual(gc.parentSpanId, c.spanId);
+  });
+
+  it('should track error status', () => {
+    const tracer = createTracer();
+    const span = tracer.startSpan('failing.op');
+    span.setError('Something went wrong');
+    span.end();
+
+    const spans = tracer.getSpans();
+    assert.strictEqual(spans[0].status, 'error');
+    assert.strictEqual(spans[0].attributes.error, 'Something went wrong');
+  });
+
+  it('should not double-end spans', () => {
+    const tracer = createTracer();
+    const span = tracer.startSpan('once');
+    span.end();
+    const dur1 = tracer.getSpans()[0].durationMs;
+    span.end(); // second call should be no-op
+    const dur2 = tracer.getSpans()[0].durationMs;
+    assert.strictEqual(dur1, dur2);
+  });
+
+  it('should generate readable summary', () => {
+    const tracer = createTracer();
+    const root = tracer.startSpan('session.create');
+    const child1 = root.startChild('model.resolve');
+    child1.end();
+    const child2 = root.startChild('extensions.load');
+    child2.end();
+    root.end();
+
+    const summary = tracer.getSummary();
+    assert.ok(summary.includes('session.create'), 'Summary should include root span');
+    assert.ok(summary.includes('model.resolve'), 'Summary should include child span');
+    assert.ok(summary.includes('extensions.load'), 'Summary should include child span');
+    assert.ok(summary.includes(tracer.traceId), 'Summary should include traceId');
+    assert.ok(summary.includes(tracer.agentId), 'Summary should include agentId');
+  });
+
+  it('should reset spans', () => {
+    const tracer = createTracer();
+    tracer.startSpan('a').end();
+    tracer.startSpan('b').end();
+    assert.strictEqual(tracer.getSpans().length, 2);
+    tracer.reset();
+    assert.strictEqual(tracer.getSpans().length, 0);
+  });
+});
+
 // --- Integration Tests (require OpenRouter API key) ---
 
 const testConfig: Partial<AgentConfig> = {
@@ -223,13 +320,23 @@ const testConfig: Partial<AgentConfig> = {
 };
 
 describe('pi-code-agent integration', () => {
-  it('should create a session with all 9 tools (default extensions)', async () => {
-    const { session } = await create(testConfig);
+  it('should create a session with all 9 tools and trace info', async () => {
+    const { session, agentId, tracer } = await create(testConfig);
     const tools = session.getActiveToolNames();
     const expected = ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls', 'web_search', 'web_fetch'];
     for (const name of expected) {
       assert.ok(tools.includes(name), `Missing tool: ${name}`);
     }
+    // Verify agentId and tracer
+    assert.ok(agentId.startsWith('agent_'), 'Should have a valid agentId');
+    assert.ok(tracer.traceId.startsWith('trace_'), 'Should have a valid traceId');
+    // Verify session.create spans exist
+    const spans = tracer.getSpans();
+    assert.ok(spans.length > 0, 'Should have recorded trace spans');
+    assert.ok(spans.some(s => s.name === 'session.create'), 'Should have session.create span');
+    assert.ok(spans.some(s => s.name === 'session.resolveModel'), 'Should have model resolve span');
+    assert.ok(spans.some(s => s.name === 'session.loadExtensions'), 'Should have extensions span');
+    assert.ok(spans.every(s => s.status === 'ok'), 'All spans should be ok');
     session.dispose();
   });
 
