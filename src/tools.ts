@@ -7,6 +7,7 @@
 
 import { Type } from '@mariozechner/pi-ai';
 import type { ExtensionFactory } from '@mariozechner/pi-coding-agent';
+import { logger, recordToolMetric } from './logger.js';
 
 // --- Tavily types ---
 
@@ -19,6 +20,91 @@ interface TavilyResult {
 interface TavilyResponse {
   answer?: string;
   results?: TavilyResult[];
+}
+
+// --- Retry helper ---
+
+const RETRYABLE_STATUS_CODES = new Set([500, 502, 503, 504, 429]);
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch with exponential backoff retry for transient failures.
+ * Retries on network errors and 5xx / 429 status codes.
+ */
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  maxRetries = 3,
+): Promise<Response> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, init);
+      if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < maxRetries) {
+        const delayMs = 1000 * 2 ** attempt;
+        logger.warn('http', `Retryable status ${response.status} from ${url}, retrying in ${delayMs}ms`, {
+          attempt: attempt + 1,
+          maxRetries,
+          status: response.status,
+        });
+        await sleep(delayMs);
+        continue;
+      }
+      return response;
+    } catch (err) {
+      if (attempt === maxRetries) throw err;
+      const delayMs = 1000 * 2 ** attempt;
+      logger.warn('http', `Network error fetching ${url}, retrying in ${delayMs}ms`, {
+        attempt: attempt + 1,
+        maxRetries,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await sleep(delayMs);
+    }
+  }
+  // Unreachable — the loop either returns or throws
+  throw new Error(`fetchWithRetry: exhausted ${maxRetries} retries for ${url}`);
+}
+
+// --- Streaming read helper ---
+
+/**
+ * Read response body as text with an early-termination cap.
+ * Uses streaming to avoid buffering the entire response into memory.
+ */
+async function readResponseText(response: Response, maxLen: number): Promise<{ text: string; truncated: boolean }> {
+  // Fallback if body stream is unavailable
+  if (!response.body) {
+    let text = await response.text();
+    const truncated = text.length > maxLen;
+    if (truncated) {
+      text = text.slice(0, maxLen);
+    }
+    return { text, truncated };
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  try {
+    while (text.length < maxLen) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    // Flush any remaining bytes
+    text += decoder.decode();
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+
+  const truncated = text.length > maxLen;
+  if (truncated) {
+    text = text.slice(0, maxLen);
+  }
+  return { text, truncated };
 }
 
 // --- Web Search ---
@@ -53,14 +139,18 @@ export function webSearchTool(options?: WebSearchOptions): ExtensionFactory {
       execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
         const key = apiKey ?? process.env.TAVILY_API_KEY;
         if (!key) {
+          logger.warn('tools', 'web_search called without TAVILY_API_KEY');
           return {
             content: [{ type: 'text' as const, text: 'Error: TAVILY_API_KEY is not set. Pass apiKey option or set TAVILY_API_KEY env var.' }],
             details: {},
           };
         }
 
+        const startTime = performance.now();
+        logger.debug('tools', 'web_search executing', { query: params.query, max_results: params.max_results });
+
         try {
-          const response = await fetch('https://api.tavily.com/search', {
+          const response = await fetchWithRetry('https://api.tavily.com/search', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -73,8 +163,11 @@ export function webSearchTool(options?: WebSearchOptions): ExtensionFactory {
           });
 
           if (!response.ok) {
+            const durationMs = Math.round(performance.now() - startTime);
+            recordToolMetric('web_search', durationMs, true);
+            logger.error('tools', `web_search HTTP error for query "${params.query}"`, { status: response.status });
             return {
-              content: [{ type: 'text' as const, text: `Search error: ${response.status} ${response.statusText}` }],
+              content: [{ type: 'text' as const, text: `Search error for query "${params.query}": ${response.status} ${response.statusText}` }],
               details: {},
             };
           }
@@ -93,14 +186,25 @@ export function webSearchTool(options?: WebSearchOptions): ExtensionFactory {
             }
           }
 
+          const durationMs = Math.round(performance.now() - startTime);
+          recordToolMetric('web_search', durationMs, false);
+          logger.debug('tools', 'web_search completed', {
+            query: params.query,
+            resultCount: data.results?.length ?? 0,
+            durationMs,
+          });
+
           return {
             content: [{ type: 'text' as const, text: result || 'No results found.' }],
             details: {},
           };
         } catch (error: unknown) {
+          const durationMs = Math.round(performance.now() - startTime);
+          recordToolMetric('web_search', durationMs, true);
           const msg = error instanceof Error ? error.message : String(error);
+          logger.error('tools', `web_search failed for query "${params.query}"`, { error: msg, durationMs });
           return {
-            content: [{ type: 'text' as const, text: `Search failed: ${msg}` }],
+            content: [{ type: 'text' as const, text: `Search failed for query "${params.query}": ${msg}` }],
             details: {},
           };
         }
@@ -133,6 +237,9 @@ export function webFetchTool(): ExtensionFactory {
         url: Type.String({ description: 'The URL to fetch' }),
       }),
       execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
+        const startTime = performance.now();
+        logger.debug('tools', 'web_fetch executing', { url: params.url });
+
         try {
           const parsed = new URL(params.url);
           if (!['http:', 'https:'].includes(parsed.protocol)) {
@@ -144,7 +251,7 @@ export function webFetchTool(): ExtensionFactory {
 
           const fetchSignal = signal ?? AbortSignal.timeout(30000);
 
-          const response = await fetch(params.url, {
+          const response = await fetchWithRetry(params.url, {
             headers: {
               'User-Agent': 'Mozilla/5.0 (compatible; pi-code-agent/0.1)',
               'Accept': 'text/html,application/json,text/plain',
@@ -153,36 +260,62 @@ export function webFetchTool(): ExtensionFactory {
           });
 
           if (!response.ok) {
+            const durationMs = Math.round(performance.now() - startTime);
+            recordToolMetric('web_fetch', durationMs, true);
+            logger.error('tools', `web_fetch HTTP error for URL "${params.url}"`, { status: response.status });
             return {
-              content: [{ type: 'text' as const, text: `Fetch error: ${response.status} ${response.statusText}` }],
+              content: [{ type: 'text' as const, text: `Fetch error for "${params.url}": ${response.status} ${response.statusText}` }],
               details: {},
             };
           }
 
           const contentType = response.headers.get('content-type') || '';
+          const maxLen = 50000;
           let text: string;
+          let truncated = false;
 
           if (contentType.includes('application/json')) {
             const json = await response.json();
             text = JSON.stringify(json, null, 2);
+            truncated = text.length > maxLen;
+            if (truncated) {
+              text = text.slice(0, maxLen);
+            }
           } else {
-            const html = await response.text();
-            text = extractTextFromHtml(html);
+            // Stream HTML with early termination
+            const result = await readResponseText(response, maxLen * 2);
+            text = extractTextFromHtml(result.text);
+            truncated = text.length > maxLen;
+            if (truncated) {
+              text = text.slice(0, maxLen);
+            }
           }
 
-          const maxLen = 50000;
-          if (text.length > maxLen) {
-            text = text.slice(0, maxLen) + `\n\n[Truncated: ${text.length - maxLen} characters omitted]`;
+          if (truncated) {
+            text += `\n\n[Truncated: content exceeded ${maxLen} character limit]`;
           }
+
+          const durationMs = Math.round(performance.now() - startTime);
+          recordToolMetric('web_fetch', durationMs, false);
+          logger.debug('tools', 'web_fetch completed', {
+            url: params.url,
+            contentType,
+            textLength: text.length,
+            truncated,
+            durationMs,
+          });
 
           return {
             content: [{ type: 'text' as const, text }],
             details: {},
           };
         } catch (error: unknown) {
+          const durationMs = Math.round(performance.now() - startTime);
+          recordToolMetric('web_fetch', durationMs, true);
           const msg = error instanceof Error ? error.message : String(error);
+          logger.error('tools', `web_fetch failed for URL "${params.url}"`, { error: msg, durationMs });
           return {
-            content: [{ type: 'text' as const, text: `Fetch failed: ${msg}` }],
+            content: [{ type: 'text' as const, text: `Fetch failed for "${params.url}": ${msg}` }],
             details: {},
           };
         }
@@ -194,29 +327,47 @@ export function webFetchTool(): ExtensionFactory {
 
 // --- HTML to text extraction ---
 
-function extractTextFromHtml(html: string): string {
-  return html
-    .replace(/<head[^>]*>[\s\S]*?<\/head>/gi, '')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, '')
-    .replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, '')
-    .replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/&mdash;/g, '\u2014')
-    .replace(/&ndash;/g, '\u2013')
-    .replace(/&hellip;/g, '\u2026')
-    .replace(/&laquo;/g, '\u00AB')
-    .replace(/&raquo;/g, '\u00BB')
+/** Named HTML entity lookup table. */
+const HTML_ENTITIES: Record<string, string> = {
+  nbsp: ' ',
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  mdash: '\u2014',
+  ndash: '\u2013',
+  hellip: '\u2026',
+  laquo: '\u00AB',
+  raquo: '\u00BB',
+};
+
+/**
+ * Decode HTML entities in a single pass using a unified regex.
+ * Handles named entities (&amp;), decimal (&#123;), and hex (&#xAB;) references.
+ */
+function decodeHtmlEntities(text: string): string {
+  return text.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|(\w+));/g, (match, dec, hex, name) => {
+    if (dec) return String.fromCharCode(Number(dec));
+    if (hex) return String.fromCharCode(parseInt(hex, 16));
+    if (name) return HTML_ENTITIES[name] ?? match;
+    return match;
+  });
+}
+
+/**
+ * Extract readable text from HTML.
+ * Removes non-content elements, strips tags, decodes entities, and normalizes whitespace.
+ */
+export function extractTextFromHtml(html: string): string {
+  return decodeHtmlEntities(
+    html
+      // Remove non-content blocks in a single combined pattern
+      .replace(/<(head|script|style|noscript|svg|iframe)[^>]*>[\s\S]*?<\/\1>/gi, '')
+      // Strip remaining HTML tags
+      .replace(/<[^>]+>/g, ' ')
+  )
+    // Collapse whitespace
     .replace(/\s+/g, ' ')
     .trim();
 }

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { create, resume, readOnlyTools, SessionManager, webSearchTool, webFetchTool, type AgentConfig } from '../src/index.js';
-import { loadEnvFile } from '../src/config.js';
+import { create, resume, readOnlyTools, SessionManager, webSearchTool, webFetchTool, extractTextFromHtml, type AgentConfig } from '../src/index.js';
+import { loadEnvFile, validateConfig, type AgentConfig as FullAgentConfig } from '../src/config.js';
 import { writeFileSync, unlinkSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -58,6 +58,159 @@ describe('loadEnvFile', () => {
 
   it('cleanup', () => {
     rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+// --- extractTextFromHtml Unit Tests ---
+
+describe('extractTextFromHtml', () => {
+  it('should strip basic HTML tags', () => {
+    const result = extractTextFromHtml('<p>Hello <b>world</b></p>');
+    assert.strictEqual(result, 'Hello world');
+  });
+
+  it('should remove <head> block entirely', () => {
+    const html = '<html><head><title>Page</title><meta charset="utf-8"></head><body>Content</body></html>';
+    const result = extractTextFromHtml(html);
+    assert.ok(!result.includes('Page'));
+    assert.ok(result.includes('Content'));
+  });
+
+  it('should remove <script> blocks', () => {
+    const html = '<div>Before</div><script>alert("xss")</script><div>After</div>';
+    const result = extractTextFromHtml(html);
+    assert.ok(!result.includes('alert'));
+    assert.ok(result.includes('Before'));
+    assert.ok(result.includes('After'));
+  });
+
+  it('should remove <style> blocks', () => {
+    const html = '<style>.foo { color: red; }</style><p>Styled text</p>';
+    const result = extractTextFromHtml(html);
+    assert.ok(!result.includes('color'));
+    assert.ok(result.includes('Styled text'));
+  });
+
+  it('should remove <noscript>, <svg>, and <iframe> blocks', () => {
+    const html = '<noscript>Enable JS</noscript><svg><circle/></svg><iframe src="x"></iframe><p>Main</p>';
+    const result = extractTextFromHtml(html);
+    assert.ok(!result.includes('Enable JS'));
+    assert.ok(!result.includes('circle'));
+    assert.ok(result.includes('Main'));
+  });
+
+  it('should decode named HTML entities', () => {
+    const html = '&amp; &lt; &gt; &quot; &apos;';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, '& < > " \'');
+  });
+
+  it('should decode &nbsp; to space', () => {
+    const html = 'Hello&nbsp;World';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, 'Hello World');
+  });
+
+  it('should decode typographic entities', () => {
+    const html = '&mdash; &ndash; &hellip; &laquo; &raquo;';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, '\u2014 \u2013 \u2026 \u00AB \u00BB');
+  });
+
+  it('should decode decimal character references', () => {
+    const html = '&#65;&#66;&#67;';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, 'ABC');
+  });
+
+  it('should decode hexadecimal character references', () => {
+    const html = '&#x41;&#x42;&#x43;';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, 'ABC');
+  });
+
+  it('should collapse multiple whitespace into single space', () => {
+    const html = '<p>  Hello   \n  \t  World  </p>';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, 'Hello World');
+  });
+
+  it('should handle empty input', () => {
+    assert.strictEqual(extractTextFromHtml(''), '');
+  });
+
+  it('should handle plain text (no HTML)', () => {
+    const result = extractTextFromHtml('Just plain text');
+    assert.strictEqual(result, 'Just plain text');
+  });
+
+  it('should handle nested tags correctly', () => {
+    const html = '<div><p>Nested <span><strong>deep</strong></span> content</p></div>';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, 'Nested deep content');
+  });
+
+  it('should preserve unknown entities as-is', () => {
+    const html = '&unknownentity;';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, '&unknownentity;');
+  });
+
+  it('should handle multiline script/style blocks', () => {
+    const html = `<script type="text/javascript">
+      function foo() {
+        console.log("test");
+      }
+    </script>
+    <style>
+      body { margin: 0; }
+      .container { width: 100%; }
+    </style>
+    <p>Visible content</p>`;
+    const result = extractTextFromHtml(html);
+    assert.ok(!result.includes('function'));
+    assert.ok(!result.includes('margin'));
+    assert.ok(result.includes('Visible content'));
+  });
+});
+
+// --- validateConfig Unit Tests ---
+
+describe('validateConfig', () => {
+  it('should pass for valid default config', () => {
+    assert.doesNotThrow(() => validateConfig({
+      cwd: '/tmp',
+      provider: 'openrouter',
+      modelId: 'anthropic/claude-sonnet-4',
+      thinkingLevel: 'medium',
+    }));
+  });
+
+  it('should throw for empty cwd', () => {
+    assert.throws(() => validateConfig({
+      cwd: '',
+      provider: 'openrouter',
+      modelId: 'anthropic/claude-sonnet-4',
+      thinkingLevel: 'medium',
+    }), /cwd is required/);
+  });
+
+  it('should throw for empty provider', () => {
+    assert.throws(() => validateConfig({
+      cwd: '/tmp',
+      provider: '',
+      modelId: 'anthropic/claude-sonnet-4',
+      thinkingLevel: 'medium',
+    }), /provider is required/);
+  });
+
+  it('should throw for empty modelId', () => {
+    assert.throws(() => validateConfig({
+      cwd: '/tmp',
+      provider: 'openrouter',
+      modelId: '',
+      thinkingLevel: 'medium',
+    }), /modelId is required/);
   });
 });
 
