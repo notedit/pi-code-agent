@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { create, resume, readOnlyTools, SessionManager, webSearchTool, webFetchTool, type AgentConfig } from '../src/index.js';
-import { loadEnvFile } from '../src/config.js';
+import { create, resume, readOnlyTools, SessionManager, webSearchTool, webFetchTool, extractTextFromHtml, createTracer, type AgentConfig } from '../src/index.js';
+import { loadEnvFile, validateConfig, type AgentConfig as FullAgentConfig } from '../src/config.js';
 import { writeFileSync, unlinkSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -61,6 +61,256 @@ describe('loadEnvFile', () => {
   });
 });
 
+// --- extractTextFromHtml Unit Tests ---
+
+describe('extractTextFromHtml', () => {
+  it('should strip basic HTML tags', () => {
+    const result = extractTextFromHtml('<p>Hello <b>world</b></p>');
+    assert.strictEqual(result, 'Hello world');
+  });
+
+  it('should remove <head> block entirely', () => {
+    const html = '<html><head><title>Page</title><meta charset="utf-8"></head><body>Content</body></html>';
+    const result = extractTextFromHtml(html);
+    assert.ok(!result.includes('Page'));
+    assert.ok(result.includes('Content'));
+  });
+
+  it('should remove <script> blocks', () => {
+    const html = '<div>Before</div><script>alert("xss")</script><div>After</div>';
+    const result = extractTextFromHtml(html);
+    assert.ok(!result.includes('alert'));
+    assert.ok(result.includes('Before'));
+    assert.ok(result.includes('After'));
+  });
+
+  it('should remove <style> blocks', () => {
+    const html = '<style>.foo { color: red; }</style><p>Styled text</p>';
+    const result = extractTextFromHtml(html);
+    assert.ok(!result.includes('color'));
+    assert.ok(result.includes('Styled text'));
+  });
+
+  it('should remove <noscript>, <svg>, and <iframe> blocks', () => {
+    const html = '<noscript>Enable JS</noscript><svg><circle/></svg><iframe src="x"></iframe><p>Main</p>';
+    const result = extractTextFromHtml(html);
+    assert.ok(!result.includes('Enable JS'));
+    assert.ok(!result.includes('circle'));
+    assert.ok(result.includes('Main'));
+  });
+
+  it('should decode named HTML entities', () => {
+    const html = '&amp; &lt; &gt; &quot; &apos;';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, '& < > " \'');
+  });
+
+  it('should decode &nbsp; to space', () => {
+    const html = 'Hello&nbsp;World';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, 'Hello World');
+  });
+
+  it('should decode typographic entities', () => {
+    const html = '&mdash; &ndash; &hellip; &laquo; &raquo;';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, '\u2014 \u2013 \u2026 \u00AB \u00BB');
+  });
+
+  it('should decode decimal character references', () => {
+    const html = '&#65;&#66;&#67;';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, 'ABC');
+  });
+
+  it('should decode hexadecimal character references', () => {
+    const html = '&#x41;&#x42;&#x43;';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, 'ABC');
+  });
+
+  it('should collapse multiple whitespace into single space', () => {
+    const html = '<p>  Hello   \n  \t  World  </p>';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, 'Hello World');
+  });
+
+  it('should handle empty input', () => {
+    assert.strictEqual(extractTextFromHtml(''), '');
+  });
+
+  it('should handle plain text (no HTML)', () => {
+    const result = extractTextFromHtml('Just plain text');
+    assert.strictEqual(result, 'Just plain text');
+  });
+
+  it('should handle nested tags correctly', () => {
+    const html = '<div><p>Nested <span><strong>deep</strong></span> content</p></div>';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, 'Nested deep content');
+  });
+
+  it('should preserve unknown entities as-is', () => {
+    const html = '&unknownentity;';
+    const result = extractTextFromHtml(html);
+    assert.strictEqual(result, '&unknownentity;');
+  });
+
+  it('should handle multiline script/style blocks', () => {
+    const html = `<script type="text/javascript">
+      function foo() {
+        console.log("test");
+      }
+    </script>
+    <style>
+      body { margin: 0; }
+      .container { width: 100%; }
+    </style>
+    <p>Visible content</p>`;
+    const result = extractTextFromHtml(html);
+    assert.ok(!result.includes('function'));
+    assert.ok(!result.includes('margin'));
+    assert.ok(result.includes('Visible content'));
+  });
+});
+
+// --- validateConfig Unit Tests ---
+
+describe('validateConfig', () => {
+  it('should pass for valid default config', () => {
+    assert.doesNotThrow(() => validateConfig({
+      cwd: '/tmp',
+      provider: 'openrouter',
+      modelId: 'anthropic/claude-sonnet-4',
+      thinkingLevel: 'medium',
+    }));
+  });
+
+  it('should throw for empty cwd', () => {
+    assert.throws(() => validateConfig({
+      cwd: '',
+      provider: 'openrouter',
+      modelId: 'anthropic/claude-sonnet-4',
+      thinkingLevel: 'medium',
+    }), /cwd is required/);
+  });
+
+  it('should throw for empty provider', () => {
+    assert.throws(() => validateConfig({
+      cwd: '/tmp',
+      provider: '',
+      modelId: 'anthropic/claude-sonnet-4',
+      thinkingLevel: 'medium',
+    }), /provider is required/);
+  });
+
+  it('should throw for empty modelId', () => {
+    assert.throws(() => validateConfig({
+      cwd: '/tmp',
+      provider: 'openrouter',
+      modelId: '',
+      thinkingLevel: 'medium',
+    }), /modelId is required/);
+  });
+});
+
+// --- Tracer Unit Tests ---
+
+describe('createTracer', () => {
+  it('should generate unique agentId and traceId', () => {
+    const tracer = createTracer();
+    assert.ok(tracer.agentId.startsWith('agent_'), `agentId should start with agent_: ${tracer.agentId}`);
+    assert.ok(tracer.traceId.startsWith('trace_'), `traceId should start with trace_: ${tracer.traceId}`);
+    assert.strictEqual(tracer.agentId.length, 'agent_'.length + 8);
+  });
+
+  it('should accept a custom agentId', () => {
+    const tracer = createTracer('agent_custom123');
+    assert.strictEqual(tracer.agentId, 'agent_custom123');
+  });
+
+  it('should record spans with timing', async () => {
+    const tracer = createTracer();
+    const span = tracer.startSpan('test.operation', { key: 'value' });
+    await new Promise((r) => setTimeout(r, 10));
+    span.end();
+
+    const spans = tracer.getSpans();
+    assert.strictEqual(spans.length, 1);
+    assert.strictEqual(spans[0].name, 'test.operation');
+    assert.strictEqual(spans[0].status, 'ok');
+    assert.ok(spans[0].durationMs !== undefined && spans[0].durationMs >= 0, 'Should have duration');
+    assert.strictEqual(spans[0].attributes.key, 'value');
+    assert.ok(spans[0].startTime, 'Should have startTime');
+    assert.ok(spans[0].endTime, 'Should have endTime');
+  });
+
+  it('should support parent-child span relationships', () => {
+    const tracer = createTracer();
+    const parent = tracer.startSpan('parent');
+    const child = parent.startChild('child', { step: 1 });
+    const grandchild = child.startChild('grandchild');
+    grandchild.end();
+    child.end();
+    parent.end();
+
+    const spans = tracer.getSpans();
+    assert.strictEqual(spans.length, 3);
+
+    const [p, c, gc] = spans;
+    assert.strictEqual(p.parentSpanId, undefined);
+    assert.strictEqual(c.parentSpanId, p.spanId);
+    assert.strictEqual(gc.parentSpanId, c.spanId);
+  });
+
+  it('should track error status', () => {
+    const tracer = createTracer();
+    const span = tracer.startSpan('failing.op');
+    span.setError('Something went wrong');
+    span.end();
+
+    const spans = tracer.getSpans();
+    assert.strictEqual(spans[0].status, 'error');
+    assert.strictEqual(spans[0].attributes.error, 'Something went wrong');
+  });
+
+  it('should not double-end spans', () => {
+    const tracer = createTracer();
+    const span = tracer.startSpan('once');
+    span.end();
+    const dur1 = tracer.getSpans()[0].durationMs;
+    span.end(); // second call should be no-op
+    const dur2 = tracer.getSpans()[0].durationMs;
+    assert.strictEqual(dur1, dur2);
+  });
+
+  it('should generate readable summary', () => {
+    const tracer = createTracer();
+    const root = tracer.startSpan('session.create');
+    const child1 = root.startChild('model.resolve');
+    child1.end();
+    const child2 = root.startChild('extensions.load');
+    child2.end();
+    root.end();
+
+    const summary = tracer.getSummary();
+    assert.ok(summary.includes('session.create'), 'Summary should include root span');
+    assert.ok(summary.includes('model.resolve'), 'Summary should include child span');
+    assert.ok(summary.includes('extensions.load'), 'Summary should include child span');
+    assert.ok(summary.includes(tracer.traceId), 'Summary should include traceId');
+    assert.ok(summary.includes(tracer.agentId), 'Summary should include agentId');
+  });
+
+  it('should reset spans', () => {
+    const tracer = createTracer();
+    tracer.startSpan('a').end();
+    tracer.startSpan('b').end();
+    assert.strictEqual(tracer.getSpans().length, 2);
+    tracer.reset();
+    assert.strictEqual(tracer.getSpans().length, 0);
+  });
+});
+
 // --- Integration Tests (require OpenRouter API key) ---
 
 const testConfig: Partial<AgentConfig> = {
@@ -70,13 +320,23 @@ const testConfig: Partial<AgentConfig> = {
 };
 
 describe('pi-code-agent integration', () => {
-  it('should create a session with all 9 tools (default extensions)', async () => {
-    const { session } = await create(testConfig);
+  it('should create a session with all 9 tools and trace info', async () => {
+    const { session, agentId, tracer } = await create(testConfig);
     const tools = session.getActiveToolNames();
     const expected = ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls', 'web_search', 'web_fetch'];
     for (const name of expected) {
       assert.ok(tools.includes(name), `Missing tool: ${name}`);
     }
+    // Verify agentId and tracer
+    assert.ok(agentId.startsWith('agent_'), 'Should have a valid agentId');
+    assert.ok(tracer.traceId.startsWith('trace_'), 'Should have a valid traceId');
+    // Verify session.create spans exist
+    const spans = tracer.getSpans();
+    assert.ok(spans.length > 0, 'Should have recorded trace spans');
+    assert.ok(spans.some(s => s.name === 'session.create'), 'Should have session.create span');
+    assert.ok(spans.some(s => s.name === 'session.resolveModel'), 'Should have model resolve span');
+    assert.ok(spans.some(s => s.name === 'session.loadExtensions'), 'Should have extensions span');
+    assert.ok(spans.every(s => s.status === 'ok'), 'All spans should be ok');
     session.dispose();
   });
 

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 
 import type { ThinkingLevel } from '@mariozechner/pi-agent-core';
 import type { ExtensionFactory, SessionManager } from '@mariozechner/pi-coding-agent';
-import type { Model } from '@mariozechner/pi-ai';
+import type { Model, Api } from '@mariozechner/pi-ai';
 
 export type { ThinkingLevel } from '@mariozechner/pi-agent-core';
 
@@ -14,7 +14,7 @@ export interface AgentConfig {
   /** Model ID within the provider. Default: 'anthropic/claude-sonnet-4' */
   modelId: string;
   /** Pre-resolved pi-mono Model object. Bypasses provider/modelId string resolution. */
-  model?: Model<any>;
+  model?: Model<Api>;
   /** Thinking/reasoning level. Default: 'medium' */
   thinkingLevel: ThinkingLevel;
   /** Path to env file for API keys. Default: undefined */
@@ -26,6 +26,7 @@ export interface AgentConfig {
   extensions?: ExtensionFactory[];
   /** Override the built-in tools array. Default: all tools (read, write, edit, bash, grep, find, ls).
    *  Pass readOnlyTools or a custom subset to restrict capabilities. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- pi-mono's Tool type is not exported; matches CreateAgentSessionOptions.tools
   tools?: any[];
   /** Override session manager. Use SessionManager.inMemory() for testing,
    *  SessionManager.open(path) for a specific session, etc. */
@@ -38,6 +39,22 @@ export const defaultConfig: AgentConfig = {
   modelId: 'anthropic/claude-sonnet-4',
   thinkingLevel: 'medium',
 };
+
+/**
+ * Validate an AgentConfig at creation time.
+ * Throws descriptive errors for clearly invalid configurations.
+ */
+export function validateConfig(config: AgentConfig): void {
+  if (!config.cwd) {
+    throw new Error('AgentConfig: cwd is required and must be a non-empty string.');
+  }
+  if (!config.provider) {
+    throw new Error('AgentConfig: provider is required (e.g. "openrouter").');
+  }
+  if (!config.modelId) {
+    throw new Error('AgentConfig: modelId is required (e.g. "anthropic/claude-sonnet-4").');
+  }
+}
 
 export function loadEnvFile(filePath: string): Record<string, string> {
   const env: Record<string, string> = {};

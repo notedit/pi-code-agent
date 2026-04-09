@@ -18,6 +18,8 @@ jobs:
           registry-url: https://npm.pkg.github.com
       - run: npm ci
       - run: npm run build
+      - run: npm test -- --test-name-pattern "loadEnvFile|extractTextFromHtml|validateConfig"
+      - run: npm audit --audit-level=moderate || true
       - run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
